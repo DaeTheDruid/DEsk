@@ -18655,6 +18655,42 @@ int desk_console_hit(int screen_w, int screen_h, double px, double py)
 	return id > 0 && id <= CC_COUNT ? id - 1 : -1;
 }
 
+/* The word stamped under a lever or the knob, as cc_legend puts it: found
+ * by taking the point back onto the control's face, where the word is. */
+int desk_console_legend_hit(int screen_w, int screen_h, double px, double py)
+{
+	struct room_render *rr;
+	double ox, oy, scale;
+	if (!console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale)) {
+		return -1;
+	}
+	double aspect = (double)rr->w / (double)(rr->h > 0 ? rr->h : 1);
+	static const int NAMED[] = { CC_WIFI, CC_BT, CC_VOL };
+	for (size_t n = 0; n < sizeof NAMED / sizeof NAMED[0]; n++) {
+		int i = NAMED[n];
+		vec3 q[4];
+		cc_quad(i, 1.0, aspect, q);
+		double fw = 0, fh = 0;
+		cc_face_size(i, &fw, &fh);
+		cairo_matrix_t mt;
+		if (!quad_matrix(&rr->console_cam, q, fw, fh, ox, oy, rr->w * scale, rr->h * scale,
+				&mt) || cairo_matrix_invert(&mt) != CAIRO_STATUS_SUCCESS) {
+			continue;
+		}
+		double fx = px, fy = py;
+		cairo_matrix_transform_point(&mt, &fx, &fy);
+		double sy = fh / (2.0 * CC[i].fs);
+		double below = i == CC_VOL ? 1.04 : CC[i].hs * 0.82 + 0.20;
+		double base = fh * 0.5 + below * sy, size = 0.155 * sy;
+		/* the line the word sits on, from its caps to below its feet, and
+		 * across the face it is printed on */
+		if (fx >= 0.0 && fx <= fw && fy >= base - size * 1.25 && fy <= base + size * 0.55) {
+			return i;
+		}
+	}
+	return -1;
+}
+
 /* The names the compositor uses have to be the ones the renderer uses. */
 _Static_assert((int)DESK_CC_COUNT == (int)CC_COUNT
 	&& (int)DESK_CC_WIFI == (int)CC_WIFI
@@ -20579,6 +20615,142 @@ static void cc_lenses_paint(cairo_t *cr, struct room_render *rr, double ox, doub
 
 }
 
+/* ---- the CHOOSE buttons ----
+ *
+ * A small brass push button beside each of the wireless lever, the
+ * Bluetooth lever and the knob, its word engraved round the foot of its
+ * ring the way the buttons under the glass carry theirs: pushed, it brings
+ * that control's tuner up out of the top of the tower, and pushed again
+ * puts it away. Where each sits on the operating panel, across and up it:
+ * just past the end of its control's legend. */
+#define CC_CHOOSE_R 0.25
+static const double CC_CHOOSE_AT[3][2] = { { -2.52, -0.15 }, { -0.95, -0.13 }, { 1.24, -0.36 } };
+static const int CC_CHOOSE_CTL[3] = { CC_WIFI, CC_BT, CC_VOL };
+
+static void cc_choose_quad(int k, double aspect, vec3 out[4])
+{
+	struct cc_face panel, tower;
+	cc_faces(&panel, &tower);
+	for (int c = 0; c < 4; c++) {
+		double du = (c & 1) ? CC_CHOOSE_R : -CC_CHOOSE_R;
+		double ds = (c & 2) ? -CC_CHOOSE_R : CC_CHOOSE_R;
+		out[c] = cc_world(&panel, CC_CHOOSE_AT[k][0] + du, 0.03, CC_CHOOSE_AT[k][1] + ds, 1.0,
+			aspect);
+	}
+}
+
+static double cc_choose_px(void)
+{
+	return ceil(2.0 * CC_CHOOSE_R * cc_face_px());
+}
+
+/* Button k's face onto the screen: its matrix, for a face f pixels square. */
+static bool cc_choose_matrix(struct room_render *rr, double ox, double oy, double scale, int k,
+	double f, cairo_matrix_t *mt)
+{
+	double aspect = (double)rr->w / (double)(rr->h > 0 ? rr->h : 1);
+	vec3 q[4];
+	cc_choose_quad(k, aspect, q);
+	return quad_matrix(&rr->console_cam, q, f, f, ox, oy, rr->w * scale, rr->h * scale, mt);
+}
+
+static void cc_choose_paint(cairo_t *cr, struct room_render *rr, double ox, double oy,
+	double scale, int k, const struct desk_console_state *st, int hover, double warm)
+{
+	double f = cc_choose_px();
+	cairo_matrix_t mt;
+	if (!cc_choose_matrix(rr, ox, oy, scale, k, f, &mt)) {
+		return;
+	}
+	int ctl = CC_CHOOSE_CTL[k];
+	bool open = st && st->choose_open == ctl;
+	/* held down, or latched down while its tuner is up, as a radio's band
+	 * buttons stay in */
+	bool down = (st && st->choose_down == ctl) || open;
+	double c = f * 0.5, ring = f * 0.48, cap = f * 0.27;
+	cairo_save(cr);
+	cairo_transform(cr, &mt);
+	/* its shadow on the panel, and the brass ring it is set in */
+	cairo_arc(cr, c + f * 0.02, c + f * 0.04, ring, 0, 2 * M_PI);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.45);
+	cairo_fill(cr);
+	cairo_pattern_t *g = cairo_pattern_create_linear(0, c - ring, 0, c + ring);
+	cairo_pattern_add_color_stop_rgb(g, 0.0, 0.86, 0.70, 0.38);
+	cairo_pattern_add_color_stop_rgb(g, 1.0, 0.46, 0.34, 0.14);
+	cairo_arc(cr, c, c, ring, 0, 2 * M_PI);
+	cairo_set_source(cr, g);
+	cairo_fill(cr);
+	cairo_pattern_destroy(g);
+	cairo_arc(cr, c, c, ring, 0, 2 * M_PI);
+	cairo_set_line_width(cr, f * 0.02);
+	cairo_set_source_rgba(cr, 0.18, 0.12, 0.04, 0.8);
+	cairo_stroke(cr);
+	/* the word round its foot */
+	show_text_fit_as(cr, DESK_FONT_ENGRAVE, TR("CHOOSE"), c, c + ring * 0.82, f * 0.135, true,
+		0.14, 0.09, 0.03, 0.92, 0, ring * 1.30);
+	/* the well the cap goes down into */
+	cairo_arc(cr, c, c - f * 0.05, cap + f * 0.035, 0, 2 * M_PI);
+	cairo_set_source_rgba(cr, 0.05, 0.035, 0.015, 0.85);
+	cairo_fill(cr);
+	/* the cap: domed brass, lower and darker pushed down; a ring of light
+	 * round it while its tuner is up */
+	double cy = c - f * 0.05 + (down ? f * 0.015 : 0.0);
+	double cr0 = down ? cap * 0.94 : cap;
+	if (open) {
+		cairo_arc(cr, c, c - f * 0.05, cap + f * 0.03, 0, 2 * M_PI);
+		cairo_set_source_rgba(cr, 1.0, 0.66, 0.22, 0.55 * warm);
+		cairo_set_line_width(cr, f * 0.025);
+		cairo_stroke(cr);
+	}
+	cairo_pattern_t *d = cairo_pattern_create_radial(c - cr0 * 0.35, cy - cr0 * 0.40, cr0 * 0.10,
+		c, cy, cr0);
+	if (down) {
+		cairo_pattern_add_color_stop_rgb(d, 0.0, 0.80, 0.64, 0.34);
+		cairo_pattern_add_color_stop_rgb(d, 1.0, 0.36, 0.26, 0.10);
+	} else {
+		cairo_pattern_add_color_stop_rgb(d, 0.0, 1.00, 0.92, 0.66);
+		cairo_pattern_add_color_stop_rgb(d, 0.55, 0.78, 0.60, 0.28);
+		cairo_pattern_add_color_stop_rgb(d, 1.0, 0.44, 0.32, 0.12);
+	}
+	cairo_arc(cr, c, cy, cr0, 0, 2 * M_PI);
+	cairo_set_source(cr, d);
+	cairo_fill(cr);
+	cairo_pattern_destroy(d);
+	if (hover == DESK_CCP_CHOOSE + k) {
+		cairo_pattern_t *l = cairo_pattern_create_radial(c, c, 0, c, c, ring * 1.2);
+		cairo_pattern_add_color_stop_rgba(l, 0.0, 1.0, 0.95, 0.80, 0.22);
+		cairo_pattern_add_color_stop_rgba(l, 1.0, 1.0, 0.95, 0.80, 0.0);
+		cairo_set_source(cr, l);
+		cairo_arc(cr, c, c, ring * 1.2, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_pattern_destroy(l);
+	}
+	cairo_restore(cr);
+}
+
+int desk_console_choose_hit(int screen_w, int screen_h, double px, double py)
+{
+	struct room_render *rr;
+	double ox, oy, scale;
+	if (!console_xform(screen_w, screen_h, &rr, &ox, &oy, &scale)) {
+		return -1;
+	}
+	double f = cc_choose_px();
+	for (int k = 0; k < 3; k++) {
+		cairo_matrix_t mt;
+		if (!cc_choose_matrix(rr, ox, oy, scale, k, f, &mt)
+			|| cairo_matrix_invert(&mt) != CAIRO_STATUS_SUCCESS) {
+			continue;
+		}
+		double x = px, y = py;
+		cairo_matrix_transform_point(&mt, &x, &y);
+		if (hypot(x - f * 0.5, y - f * 0.5) <= f * 0.50) {
+			return CC_CHOOSE_CTL[k];
+		}
+	}
+	return -1;
+}
+
 /* One piece of the set's live half: a control, the nameplate, the row of
  * lenses, or the glass. The compositor keeps each as a sprite of its own
  * and redraws it only when its key moves; the preview paints them all. */
@@ -20599,6 +20771,8 @@ static void console_piece_paint(cairo_t *cr, int screen_h, struct room_render *r
 			1.0, aspect, st ? st->guard : 0.0);
 	} else if (p == DESK_CCP_ANTENNA) {
 		cc_antenna(cr, rr, ox, oy, scale, aspect, st ? st->antenna : 1.0);
+	} else if (p >= DESK_CCP_CHOOSE && p <= DESK_CCP_CHOOSE_LAST) {
+		cc_choose_paint(cr, rr, ox, oy, scale, p - DESK_CCP_CHOOSE, st, hover, warm);
 	}
 }
 
@@ -20738,6 +20912,12 @@ uint64_t desk_console_piece_key(int p, const struct desk_console_state *st,
 		KEY_ADD(h, st ? st->antenna : 1.0);
 		break;
 	default:
+		if (p >= DESK_CCP_CHOOSE && p <= DESK_CCP_CHOOSE_LAST) {
+			KEY_ADD(h, hover == p);
+			KEY_ADD(h, st ? st->choose_down : -1);
+			KEY_ADD(h, st ? st->choose_open : -1);
+			KEY_ADD(h, warm);
+		}
 		break;
 	}
 	return h;
@@ -20747,6 +20927,28 @@ bool desk_console_piece_box(int w, int h, int p, double box[4])
 {
 	struct room_render *rr;
 	double ox, oy, scale;
+	if (p >= DESK_CCP_CHOOSE && p <= DESK_CCP_CHOOSE_LAST) {
+		cairo_matrix_t mt;
+		double f = cc_choose_px();
+		if (!console_xform(w, h, &rr, &ox, &oy, &scale)
+			|| !cc_choose_matrix(rr, ox, oy, scale, p - DESK_CCP_CHOOSE, f, &mt)) {
+			return false;
+		}
+		double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+		for (int k = 0; k < 4; k++) {
+			double x = (k & 1) ? f : 0.0, y = (k & 2) ? f : 0.0;
+			cairo_matrix_transform_point(&mt, &x, &y);
+			x0 = fmin(x0, x);
+			y0 = fmin(y0, y);
+			x1 = fmax(x1, x);
+			y1 = fmax(y1, y);
+		}
+		box[0] = floor(x0) - 3.0;
+		box[1] = floor(y0) - 3.0;
+		box[2] = ceil(x1) + 3.0 - box[0];
+		box[3] = ceil(y1) + 3.0 - box[1];
+		return true;
+	}
 	if (p >= CC_COUNT || !console_xform(w, h, &rr, &ox, &oy, &scale)) {
 		return false;
 	}
@@ -20795,6 +20997,415 @@ bool desk_console_piece_box(int w, int h, int p, double box[4])
 	box[1] = floor(y0) - 2.0;
 	box[2] = ceil(x1) + 2.0 - box[0];
 	box[3] = ceil(y1) + 2.0 - box[1];
+	return true;
+}
+
+/* ---- the tuner ----------------------------------------------------
+ *
+ * Laid out at 1200 x 320, the shape of the lid's window, and scaled
+ * by k. The dial is a cream scale round the knob in the middle, like the
+ * meters on the set; its names are printed a fixed angle apart, and the
+ * scale turns so the one chosen is under the red pointer at the top. Only
+ * the names near the top can be read on a dial, which is why a set like
+ * this has a readout: on the left, under its name and over the button
+ * that looks again; on the right, the speaker and the whole program. */
+
+#define TUNER_W 1200.0
+#define TUNER_H 320.0
+#define TUNER_CX 600.0
+#define TUNER_CY 268.0
+#define TUNER_RIN 60.0
+#define TUNER_ROUT 238.0
+#define TUNER_RNAME 178.0
+#define TUNER_KNOB 46.0
+#define TUNER_STEP (28.0 * M_PI / 180.0)
+#define TUNER_REACH (84.0 * M_PI / 180.0)
+#define TUNER_LX 150.0
+#define TUNER_RX 1050.0
+#define TUNER_BY 262.0
+#define TUNER_BTN 19.0
+
+/* A name on the dial, centred on the origin: a little smaller if it must,
+ * and then cut short, since a name shrunk to fit a scale's step is a name
+ * nobody can read -- the readout has it whole. */
+static void tuner_name(cairo_t *cr, const char *s, double size, bool bold, double a,
+	double max_w)
+{
+	char buf[256];
+	s = utf8_clean(s, buf, sizeof buf);
+	char cut[256];
+	snprintf(cut, sizeof cut, "%s", s);
+	cairo_save(cr);
+	desk_font_select(cr, DESK_FONT_UI, cut, bold, false);
+	double use = size;
+	cairo_text_extents_t ext;
+	for (;;) {
+		cairo_set_font_size(cr, use);
+		cairo_text_extents(cr, cut, &ext);
+		if (ext.width <= max_w || use <= size * 0.86) {
+			break;
+		}
+		use *= 0.95;
+	}
+	size_t len = strlen(cut);
+	while (ext.width > max_w && len > 1) {
+		do {
+			len--;
+		} while (len > 1 && ((unsigned char)cut[len] & 0xc0) == 0x80);
+		snprintf(cut + len, sizeof cut - len, "..");
+		cairo_text_extents(cr, cut, &ext);
+	}
+	cairo_set_source_rgba(cr, 0.12, 0.09, 0.06, a);
+	cairo_move_to(cr, -ext.width * 0.5 - ext.x_bearing, 4.0);
+	cairo_show_text(cr, cut);
+	cairo_restore(cr);
+}
+
+/* A brass push button at x, y (the tuner's own units), its word under it. */
+static void tuner_button(cairo_t *cr, double x, double y, const char *word, bool hot)
+{
+	cairo_pattern_t *g = cairo_pattern_create_radial(x - 5, y - 6, 2, x, y, TUNER_BTN);
+	cairo_pattern_add_color_stop_rgb(g, 0.0, 0.96, 0.84, 0.52);
+	cairo_pattern_add_color_stop_rgb(g, 0.6, 0.72, 0.56, 0.26);
+	cairo_pattern_add_color_stop_rgb(g, 1.0, 0.42, 0.31, 0.12);
+	cairo_arc(cr, x, y + 2.0, TUNER_BTN + 2.0, 0, 2 * M_PI);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.45);
+	cairo_fill(cr);
+	cairo_arc(cr, x, y, TUNER_BTN, 0, 2 * M_PI);
+	cairo_set_source(cr, g);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(g);
+	cairo_set_line_width(cr, 1.2);
+	cairo_set_source_rgba(cr, 0.20, 0.14, 0.05, 0.8);
+	cairo_stroke(cr);
+	if (hot) {
+		cairo_arc(cr, x, y, TUNER_BTN - 3.0, 0, 2 * M_PI);
+		cairo_set_source_rgba(cr, 1.0, 0.95, 0.80, 0.30);
+		cairo_fill(cr);
+	}
+	show_text_fit_as(cr, DESK_FONT_ENGRAVE, word, x, y + TUNER_BTN + 19.0, 16.0, true,
+		0.84, 0.79, 0.66, 0.85, 0, 170.0);
+}
+
+void desk_draw_tuner(cairo_t *cr, const struct desk_tuner *t, const struct desk_tuner_place *pl,
+	double pull)
+{
+	pull = clampf(pull, 0.0, 1.0);
+	double k = pl->k;
+	cairo_save(cr);
+	cairo_translate(cr, pl->x, pl->y - (1.0 - pull) * pl->travel);
+	cairo_scale(cr, k, k);
+	cairo_push_group(cr);
+
+	{
+		/* what it throws on the set */
+		for (int i = 5; i >= 1; i--) {
+			double g = i * 3.0;
+			cairo_set_source_rgba(cr, 0.02, 0.01, 0.0, 0.07);
+			desk_rounded_path(cr, -g + 3.0, -g + 6.0, TUNER_W + 2 * g, TUNER_H + 2 * g,
+				14.0 + g);
+			cairo_fill(cr);
+		}
+		/* the case: walnut, with a brass trim round its face */
+		cairo_pattern_t *wood = cairo_pattern_create_linear(0, 0, 0, TUNER_H);
+		cairo_pattern_add_color_stop_rgb(wood, 0.0, 0.30, 0.17, 0.08);
+		cairo_pattern_add_color_stop_rgb(wood, 1.0, 0.18, 0.10, 0.05);
+		desk_rounded_path(cr, 0, 0, TUNER_W, TUNER_H, 14.0);
+		cairo_set_source(cr, wood);
+		cairo_fill(cr);
+		cairo_pattern_destroy(wood);
+		cairo_pattern_t *face = cairo_pattern_create_linear(0, 10, 0, TUNER_H - 10);
+		cairo_pattern_add_color_stop_rgb(face, 0.0, 0.135, 0.120, 0.105);
+		cairo_pattern_add_color_stop_rgb(face, 1.0, 0.085, 0.075, 0.065);
+		desk_rounded_path(cr, 10, 10, TUNER_W - 20, TUNER_H - 20, 9.0);
+		cairo_set_source(cr, face);
+		cairo_fill_preserve(cr);
+		cairo_pattern_destroy(face);
+		cairo_set_line_width(cr, 2.0);
+		cairo_set_source_rgba(cr, 0.78, 0.62, 0.30, 0.85);
+		cairo_stroke(cr);
+		overlay_grain(cr, 10, 10, TUNER_W - 20, TUNER_H - 20, 0.6);
+	}
+
+	show_text_fit_as(cr, DESK_FONT_ENGRAVE, t->title, 40.0, 54.0, 22.0, true,
+		0.84, 0.79, 0.66, 0.85, -1, 330.0);
+	/* a lamp at the corner, which flickers while something is being done */
+	double busy = t->busy ? 0.55 + 0.45 * sin(t->clock * 7.0) : 0.0;
+	cairo_set_source_rgba(cr, 0.10, 0.09, 0.08, 0.60);
+	cairo_arc(cr, TUNER_W - 36.0, 34.0, 8.0, 0, 2 * M_PI);
+	cairo_fill(cr);
+	cc_lamp(cr, TUNER_W - 36.0, 34.0, 7.0, 1.0, 0.64, 0.18, busy);
+
+	/* ---- the dial: a cream scale under glass, round the knob ---- */
+	double cx = TUNER_CX, cy = TUNER_CY;
+	double a0 = -M_PI * 0.5 - TUNER_REACH - 0.06, a1 = -M_PI * 0.5 + TUNER_REACH + 0.06;
+	cairo_new_path(cr);
+	cairo_arc(cr, cx, cy, TUNER_ROUT + 8.0, a0, a1);
+	cairo_arc_negative(cr, cx, cy, TUNER_RIN - 8.0, a1, a0);
+	cairo_close_path(cr);
+	cairo_set_source_rgb(cr, 0.70, 0.55, 0.26);
+	cairo_fill(cr);
+	cairo_new_path(cr);
+	cairo_arc(cr, cx, cy, TUNER_ROUT, a0, a1);
+	cairo_arc_negative(cr, cx, cy, TUNER_RIN, a1, a0);
+	cairo_close_path(cr);
+	cairo_pattern_t *cream = cairo_pattern_create_radial(cx, cy - 120, 20, cx, cy, TUNER_ROUT);
+	cairo_pattern_add_color_stop_rgb(cream, 0.0, 0.965, 0.935, 0.850);
+	cairo_pattern_add_color_stop_rgb(cream, 1.0, 0.880, 0.835, 0.720);
+	cairo_set_source(cr, cream);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(cream);
+	cairo_save(cr);
+	cairo_clip(cr);
+	/* the names, a step apart, turned with the scale; the ones far round
+	 * fade into the bezel's shadow */
+	double pos = t->pos;
+	int first = (int)floor(pos - TUNER_REACH / TUNER_STEP) - 1;
+	int last = (int)ceil(pos + TUNER_REACH / TUNER_STEP) + 1;
+	for (int i = first; i <= last; i++) {
+		if (i < 0 || i >= t->n) {
+			continue;
+		}
+		double th = (i - pos) * TUNER_STEP;
+		if (fabs(th) > TUNER_REACH + 0.2) {
+			continue;
+		}
+		double fade = 1.0 - smoothstepf(TUNER_REACH * 0.62, TUNER_REACH + 0.1, fabs(th));
+		double a = th - M_PI * 0.5;
+		/* its tick, long, and the lamp of one in use beside it */
+		cairo_set_source_rgba(cr, 0.12, 0.09, 0.05, 0.85 * fade);
+		cairo_set_line_width(cr, 2.0);
+		cairo_move_to(cr, cx + cos(a) * (TUNER_ROUT - 22.0), cy + sin(a) * (TUNER_ROUT - 22.0));
+		cairo_line_to(cr, cx + cos(a) * (TUNER_ROUT - 2.0), cy + sin(a) * (TUNER_ROUT - 2.0));
+		cairo_stroke(cr);
+		if (t->lit[i]) {
+			double lx = cx + cos(a) * (TUNER_RIN + 22.0), ly = cy + sin(a) * (TUNER_RIN + 22.0);
+			cairo_set_source_rgba(cr, 0.10, 0.09, 0.08, 0.5 * fade);
+			cairo_arc(cr, lx, ly, 6.0, 0, 2 * M_PI);
+			cairo_fill(cr);
+			cc_lamp(cr, lx, ly, 5.0, 0.26, 1.0, 0.36, fade);
+		}
+		/* the name, along the scale */
+		cairo_save(cr);
+		cairo_translate(cr, cx + cos(a) * TUNER_RNAME, cy + sin(a) * TUNER_RNAME);
+		cairo_rotate(cr, th);
+		tuner_name(cr, t->name[i], 16.0, fabs(th) < TUNER_STEP * 0.5, 0.92 * fade,
+			TUNER_STEP * TUNER_RNAME * 0.94);
+		cairo_restore(cr);
+		/* and the small divisions on the way to the next */
+		if (i + 1 < t->n) {
+			for (int s = 1; s < 4; s++) {
+				double b = a + TUNER_STEP * s / 4.0;
+				cairo_set_line_width(cr, 1.0);
+				cairo_set_source_rgba(cr, 0.12, 0.09, 0.05, 0.55 * fade);
+				cairo_move_to(cr, cx + cos(b) * (TUNER_ROUT - 10.0), cy + sin(b) * (TUNER_ROUT - 10.0));
+				cairo_line_to(cr, cx + cos(b) * (TUNER_ROUT - 2.0), cy + sin(b) * (TUNER_ROUT - 2.0));
+				cairo_stroke(cr);
+			}
+		}
+	}
+	if (t->n == 0) {
+		show_text_as(cr, DESK_FONT_ENGRAVE, "- - -", cx, cy - 140.0, 16.0, true,
+			0.30, 0.26, 0.20, 0.5, 0);
+	}
+	/* the glass over it: a sheen across the top */
+	cairo_pattern_t *sheen = cairo_pattern_create_linear(0, cy - TUNER_ROUT, 0, cy - 40);
+	cairo_pattern_add_color_stop_rgba(sheen, 0.0, 1.0, 1.0, 1.0, 0.20);
+	cairo_pattern_add_color_stop_rgba(sheen, 1.0, 1.0, 1.0, 1.0, 0.0);
+	cairo_set_source(cr, sheen);
+	cairo_paint(cr);
+	cairo_pattern_destroy(sheen);
+	cairo_restore(cr);
+	if (t->hot == DESK_TUNER_DIAL) {
+		cairo_new_path(cr);
+		cairo_arc(cr, cx, cy, TUNER_ROUT, a0, a1);
+		cairo_arc_negative(cr, cx, cy, TUNER_RIN, a1, a0);
+		cairo_close_path(cr);
+		cairo_set_source_rgba(cr, 1.0, 0.95, 0.80, 0.08);
+		cairo_fill(cr);
+	}
+
+	/* the pointer: fixed, red, from the knob to past the scale -- broken
+	 * where the name it points at is printed, so the name can be read */
+	for (int pass = 0; pass < 2; pass++) {
+		double off = pass ? 0.0 : 2.0;
+		if (pass) {
+			cairo_set_source_rgb(cr, 0.78, 0.12, 0.08);
+			cairo_set_line_width(cr, 2.2);
+		} else {
+			cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.25);
+			cairo_set_line_width(cr, 3.0);
+		}
+		cairo_move_to(cr, cx + off, cy - TUNER_KNOB + off);
+		cairo_line_to(cr, cx + off, cy - (TUNER_RNAME - 13.0) + off);
+		cairo_move_to(cr, cx + off, cy - (TUNER_RNAME + 16.0) + off);
+		cairo_line_to(cr, cx + off, cy - TUNER_ROUT - 4.0 + off);
+		cairo_stroke(cr);
+	}
+	cairo_set_source_rgb(cr, 0.78, 0.12, 0.08);
+	cairo_move_to(cr, cx, cy - TUNER_ROUT - 4.0);
+	cairo_line_to(cr, cx - 7.0, cy - TUNER_ROUT - 16.0);
+	cairo_line_to(cr, cx + 7.0, cy - TUNER_ROUT - 16.0);
+	cairo_close_path(cr);
+	cairo_fill(cr);
+
+	/* ---- the knob: fluted bakelite, turned as the scale is ---- */
+	cairo_arc(cr, cx, cy + 3.0, TUNER_KNOB + 6.0, 0, 2 * M_PI);
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.5);
+	cairo_fill(cr);
+	cairo_arc(cr, cx, cy, TUNER_KNOB + 5.0, 0, 2 * M_PI);
+	cairo_set_source_rgb(cr, 0.62, 0.48, 0.22);
+	cairo_fill(cr);
+	cairo_pattern_t *bk = cairo_pattern_create_radial(cx - 14, cy - 18, 4, cx, cy, TUNER_KNOB);
+	cairo_pattern_add_color_stop_rgb(bk, 0.0, 0.30, 0.27, 0.24);
+	cairo_pattern_add_color_stop_rgb(bk, 1.0, 0.05, 0.045, 0.04);
+	cairo_arc(cr, cx, cy, TUNER_KNOB, 0, 2 * M_PI);
+	cairo_set_source(cr, bk);
+	cairo_fill(cr);
+	cairo_pattern_destroy(bk);
+	double turn = pos * TUNER_STEP * 1.5;
+	cairo_set_line_width(cr, 2.0);
+	for (int f = 0; f < 18; f++) {
+		double b = turn + f * 2.0 * M_PI / 18.0;
+		cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.55);
+		cairo_move_to(cr, cx + cos(b) * (TUNER_KNOB - 9.0), cy + sin(b) * (TUNER_KNOB - 9.0));
+		cairo_line_to(cr, cx + cos(b) * (TUNER_KNOB - 1.0), cy + sin(b) * (TUNER_KNOB - 1.0));
+		cairo_stroke(cr);
+	}
+	/* its mark, which goes round with it */
+	cairo_set_source_rgba(cr, 0.96, 0.91, 0.74, 0.9);
+	cairo_set_line_width(cr, 4.0);
+	cairo_move_to(cr, cx + cos(turn - M_PI * 0.5) * 14.0, cy + sin(turn - M_PI * 0.5) * 14.0);
+	cairo_line_to(cr, cx + cos(turn - M_PI * 0.5) * (TUNER_KNOB - 12.0),
+		cy + sin(turn - M_PI * 0.5) * (TUNER_KNOB - 12.0));
+	cairo_stroke(cr);
+	if (t->hot == DESK_TUNER_KNOB) {
+		cairo_arc(cr, cx, cy, TUNER_KNOB, 0, 2 * M_PI);
+		cairo_set_source_rgba(cr, 1.0, 0.95, 0.80, 0.14);
+		cairo_fill(cr);
+	}
+
+	/* ---- the readout: lit amber behind a window ---- */
+	double rx = 40.0, ry = 92.0, rw = 330.0, rh = 80.0;
+	desk_rounded_path(cr, rx - 3, ry - 3, rw + 6, rh + 6, 6.0);
+	cairo_set_source_rgb(cr, 0.62, 0.48, 0.22);
+	cairo_fill(cr);
+	desk_rounded_path(cr, rx, ry, rw, rh, 4.0);
+	cairo_set_source_rgb(cr, 0.06, 0.035, 0.015);
+	cairo_fill(cr);
+	show_text_fit(cr, t->read1, rx + rw * 0.5, ry + 38.0, 27.0, true, 1.0, 0.70, 0.28, 0.96, 0,
+		rw - 20.0);
+	show_text_fit(cr, t->read2, rx + rw * 0.5, ry + 67.0, 18.0, false, 1.0, 0.70, 0.28, 0.75, 0,
+		rw - 20.0);
+
+	/* ---- the other readout: what is in use now, wherever the dial is ---- */
+	{
+		double gx = TUNER_W - 40.0 - rw;
+		desk_rounded_path(cr, gx - 3, ry - 3, rw + 6, rh + 6, 6.0);
+		cairo_set_source_rgb(cr, 0.62, 0.48, 0.22);
+		cairo_fill(cr);
+		desk_rounded_path(cr, gx, ry, rw, rh, 4.0);
+		cairo_set_source_rgb(cr, 0.06, 0.035, 0.015);
+		cairo_fill(cr);
+		show_text_fit(cr, t->read3, gx + rw * 0.5, ry + 38.0, 27.0, true, 1.0, 0.70, 0.28, 0.96,
+			0, rw - 20.0);
+		show_text_fit(cr, t->read4, gx + rw * 0.5, ry + 67.0, 18.0, false, 1.0, 0.70, 0.28, 0.75,
+			0, rw - 20.0);
+	}
+
+	/* ---- the buttons ---- */
+	if (t->band >= 0) {
+		/* a band switch: a slide between two words */
+		double x0 = TUNER_LX - 40.0, x1 = TUNER_LX + 40.0, y = TUNER_BY;
+		desk_rounded_path(cr, x0 - 6, y - 9, x1 - x0 + 12, 18, 9);
+		cairo_set_source_rgb(cr, 0.03, 0.025, 0.02);
+		cairo_fill(cr);
+		double kx = t->band ? x1 - 6.0 : x0 + 6.0;
+		cairo_pattern_t *g = cairo_pattern_create_linear(0, y - 10, 0, y + 10);
+		cairo_pattern_add_color_stop_rgb(g, 0.0, 0.94, 0.80, 0.48);
+		cairo_pattern_add_color_stop_rgb(g, 1.0, 0.50, 0.37, 0.15);
+		desk_rounded_path(cr, kx - 14, y - 11, 28, 22, 5);
+		cairo_set_source(cr, g);
+		cairo_fill(cr);
+		cairo_pattern_destroy(g);
+		for (int b = 0; b < 2; b++) {
+			show_text_fit_as(cr, DESK_FONT_ENGRAVE, t->band_word[b], b ? x1 + 10.0 : x0 - 10.0,
+				y + 34.0, 15.0, true, 0.84, 0.79, 0.66, t->band == b ? 0.95 : 0.45, 0, 110.0);
+		}
+		if (t->hot == DESK_TUNER_BAND) {
+			desk_rounded_path(cr, x0 - 6, y - 9, x1 - x0 + 12, 18, 9);
+			cairo_set_source_rgba(cr, 1.0, 0.95, 0.80, 0.12);
+			cairo_fill(cr);
+		}
+	} else if (t->left) {
+		tuner_button(cr, TUNER_LX, TUNER_BY - 8.0, t->left, t->hot == DESK_TUNER_LEFT);
+	}
+	if (t->right) {
+		tuner_button(cr, TUNER_RX, TUNER_BY - 8.0, t->right, t->hot == DESK_TUNER_RIGHT);
+	}
+
+	cairo_pop_group_to_source(cr);
+	cairo_paint_with_alpha(cr, pull);
+	cairo_restore(cr);
+}
+
+int desk_tuner_hit(const struct desk_tuner *t, const struct desk_tuner_place *pl, double px,
+	double py, double *at)
+{
+	double x = (px - pl->x) / pl->k, y = (py - pl->y) / pl->k;
+	if (x < 0.0 || y < 0.0 || x > TUNER_W || y > TUNER_H) {
+		return DESK_TUNER_OUT;
+	}
+	double dx = x - TUNER_CX, dy = y - TUNER_CY, d = hypot(dx, dy);
+	if (d <= TUNER_KNOB + 4.0) {
+		return DESK_TUNER_KNOB;
+	}
+	if (d >= TUNER_RIN && d <= TUNER_ROUT + 8.0 && dy < 0.0) {
+		double th = atan2(dx, -dy);
+		if (fabs(th) <= TUNER_REACH) {
+			if (at) {
+				*at = t->pos + th / TUNER_STEP;
+			}
+			return DESK_TUNER_DIAL;
+		}
+	}
+	if (t->band >= 0 && fabs(x - TUNER_LX) <= 52.0 && fabs(y - TUNER_BY) <= 22.0) {
+		return DESK_TUNER_BAND;
+	}
+	if (t->left && hypot(x - TUNER_LX, y - (TUNER_BY - 8.0)) <= TUNER_BTN + 6.0) {
+		return DESK_TUNER_LEFT;
+	}
+	if (t->right && hypot(x - TUNER_RX, y - (TUNER_BY - 8.0)) <= TUNER_BTN + 6.0) {
+		return DESK_TUNER_RIGHT;
+	}
+	return DESK_TUNER_PLATE;
+}
+
+/* Where the tuner's card rests: over the set, centred above the row of
+ * CHOOSE buttons it comes out from under. clip_y is the top of that row,
+ * the line the card is cut at while it slides out from behind the
+ * controls; margin is the room round the card for the shadow it throws. */
+bool desk_console_card_place(int w, int h, struct desk_tuner_place *pl, double *clip_y,
+	int *margin)
+{
+	double ytop = 1e9;
+	for (int p = DESK_CCP_CHOOSE; p <= DESK_CCP_CHOOSE_LAST; p++) {
+		double box[4];
+		if (!desk_console_piece_box(w, h, p, box)) {
+			return false;
+		}
+		ytop = fmin(ytop, box[1]);
+	}
+	double k = fmin(w * 0.62 / TUNER_W, h * 0.30 / TUNER_H);
+	pl->k = k;
+	pl->w = TUNER_W * k;
+	pl->h = TUNER_H * k;
+	pl->x = floor((w - pl->w) * 0.5);
+	double gap = 0.02 * h;
+	pl->y = floor(fmax(0.02 * h, ytop - gap - pl->h));
+	pl->travel = ytop - pl->y;
+	*clip_y = ytop;
+	*margin = (int)ceil(18.0 * k) + 2;
 	return true;
 }
 

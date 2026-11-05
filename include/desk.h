@@ -149,6 +149,9 @@ struct desk_console_state {
 	double dying;       /* 0 .. 1 the set going out after the push */
 	double lock_push;   /* 0 .. 1 the LOCK button pushed in */
 	double antenna;     /* the wireless aerial: 0 down .. 1 all the way up */
+	/* the CHOOSE buttons: the one held down, and the one whose tuner is up
+	 * (DESK_CC_WIFI, _BT or _VOL; -1 none) */
+	int choose_down, choose_open;
 };
 void desk_draw_console(cairo_t *cr, int w, int h,
 	const struct desk_console_state *st, int hover);
@@ -156,6 +159,65 @@ void desk_draw_console(cairo_t *cr, int w, int h,
  * instruments drawn over it as they change. */
 void desk_draw_console_base(cairo_t *cr, int w, int h);
 int desk_console_hit(int w, int h, double px, double py);
+/* The word stamped under a lever or the knob -- WIRELESS, BLUETOOTH,
+ * VOLUME -- under the point: DESK_CC_WIFI, _BT or _VOL, else -1. What is
+ * behind the control comes out on a tuner for it. */
+int desk_console_legend_hit(int w, int h, double px, double py);
+/* The CHOOSE button under the point: DESK_CC_WIFI, _BT or _VOL, else -1. */
+int desk_console_choose_hit(int w, int h, double px, double py);
+
+/* The tuner: a radio's tuning dial, on a card that comes out
+ * from under the set's controls, for what is behind a lever or the
+ * knob -- the networks in range, the Bluetooth devices, the speakers and
+ * microphones. Their names are printed round the dial's scale; turning
+ * the knob rolls the scale under a fixed pointer, the readout under the
+ * knob spells out the one under it, and pressing the knob takes it. A
+ * button on the left looks again (or, for sound, a band switch chooses
+ * between playing and recording), and one on the right opens the whole
+ * program. Laid out 1200 x 320. */
+#define DESK_TUNER_MAX 40
+struct desk_tuner {
+	char title[64];                    /* engraved at its corner */
+	int n;
+	char name[DESK_TUNER_MAX][128];
+	bool lit[DESK_TUNER_MAX];          /* connected, or the one in use */
+	double pos;                        /* the entry under the pointer, between two while turning */
+	char read1[128], read2[96];        /* the readout: a name, and how it stands */
+	char read3[128], read4[96];        /* the other readout: what is in use now */
+	const char *left;                  /* the left button's word, or NULL */
+	int band;                          /* -1 none; else which of band_word is chosen */
+	const char *band_word[2];
+	const char *right;                 /* the right button's word */
+	int hot;                           /* DESK_TUNER_* under the pointer, or -1 */
+	bool busy;                         /* something asked of it, not back yet */
+	double clock;                      /* seconds, for the busy lamp */
+};
+enum {
+	DESK_TUNER_OUT = -3,     /* not on it */
+	DESK_TUNER_PLATE = -1,   /* on it, on nothing */
+	DESK_TUNER_KNOB = 0,
+	DESK_TUNER_DIAL,
+	DESK_TUNER_LEFT,
+	DESK_TUNER_BAND,
+	DESK_TUNER_RIGHT,
+};
+struct desk_tuner_place {
+	double x, y, w, h;       /* where it is drawn */
+	double k;                /* its size against the 600 x 400 it is laid out at */
+	double travel;           /* how far it has still to come at pull 0 */
+};
+void desk_draw_tuner(cairo_t *cr, const struct desk_tuner *t, const struct desk_tuner_place *pl,
+	double pull);
+/* Where the card rests on the screen w by h (for desk_draw_tuner at pull 1,
+ * and desk_tuner_hit), how far below that it starts (pl->travel), the line it
+ * is cut at while it comes out from behind the controls, and the margin
+ * round it for its shadow. */
+bool desk_console_card_place(int w, int h, struct desk_tuner_place *pl, double *clip_y,
+	int *margin);
+/* What is under a point on it, out: DESK_TUNER_*. On the dial, *at is the
+ * entry printed there (fractional: round it). */
+int desk_tuner_hit(const struct desk_tuner *t, const struct desk_tuner_place *pl, double px,
+	double py, double *at);
 /* the glass over the guarded set, which is drawn rather than baked */
 bool desk_console_guard_hit(int w, int h, double px, double py, double open);
 /* Is the pointer on the set as it stands on the desk, seen from the desk's
@@ -181,6 +243,10 @@ enum {
 	DESK_CCP_LENSES,
 	DESK_CCP_GUARD,
 	DESK_CCP_ANTENNA,
+	/* the brass CHOOSE buttons beside the wireless lever, the Bluetooth
+	 * lever and the knob, in that order: each brings its tuner up */
+	DESK_CCP_CHOOSE,
+	DESK_CCP_CHOOSE_LAST = DESK_CCP_CHOOSE + 2,
 	DESK_CCP_COUNT,
 };
 struct desk_meters;
